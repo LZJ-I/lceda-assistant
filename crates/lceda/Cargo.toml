@@ -1,0 +1,23 @@
+[package]
+name = "lceda"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "立创封装助手：搜索、3D、Altium / KiCad 库导出"
+
+[[bin]]
+name = "lceda"
+path = "src/main.rs"
+
+[dependencies]
+lceda-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+image.workspace = true
+eframe = { version = "0.32", default-features = true }
+egui = "0.32"
+egui_extras = { version = "0.32", features = ["image"] }
+poll-promise = "0.3"
+rfd = "0.15"
+directories = "6"
+webbrowser = "1"
