@@ -1,0 +1,12 @@
+/target
+/dist
+**/*.rs.bk
+.idea/
+.vscode/
+*.swp
+.env
+/output
+/ad_lib
+/step
+/temp
+.ad_altium_builder/

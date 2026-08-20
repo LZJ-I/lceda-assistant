@@ -1,0 +1,16 @@
+[package]
+name = "lceda-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "立创 / LCSC 器件搜索、3D 下载与 Altium / KiCad 库写出"
+
+[dependencies]
+cfb.workspace = true
+encoding_rs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tobj.workspace = true
+ureq.workspace = true
+urlencoding.workspace = true
