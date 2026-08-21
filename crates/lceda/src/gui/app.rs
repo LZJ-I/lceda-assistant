@@ -1,7 +1,7 @@
 use super::preview3d::{self, GpuPreview};
 use super::theme::{self, ACCENT, LABEL, SECONDARY, WELL, WINDOW_BG};
 use crate::i18n::{self, Lang};
-use crate::update::{self, CheckResult, UpdateInfo};
+use crate::update::{self, CheckResult, UpdateInfo, UpdatePhase, UpdateProgress};
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 use eframe::egui_glow::glow;
 use lceda_core::client::LcedaClient;
@@ -12,7 +12,7 @@ use poll_promise::Promise;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 type SearchPromise = Promise<lceda_core::Result<Vec<SearchItem>>>;
 type ExportPromise = Promise<lceda_core::Result<String>>;
@@ -132,6 +132,7 @@ struct App {
     update_manual: bool,
     update: Option<UpdateInfo>,
     update_job: Option<ApplyPromise>,
+    update_progress: Option<update::ProgressHandle>,
     frame: u32,
     pending_search: Option<String>,
     shot_path: Option<PathBuf>,
@@ -182,6 +183,7 @@ impl App {
             update_manual: false,
             update: None,
             update_job: None,
+            update_progress: None,
             frame: 0,
             pending_search: env::var("LCEDA_SEARCH").ok().filter(|s| !s.is_empty()),
             shot_path: env::var("LCEDA_SHOT").ok().filter(|s| !s.is_empty()).map(PathBuf::from),
@@ -393,9 +395,26 @@ impl App {
                 ui.add(egui::Label::new(egui::RichText::new(body).color(LABEL)).wrap());
                 if downloading {
                     ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new(i18n::t(self.lang, "update_downloading")).color(SECONDARY),
-                    );
+                    let (label, fraction, indeterminate) = self
+                        .update_progress
+                        .as_ref()
+                        .and_then(|p| p.lock().ok())
+                        .map(|g| {
+                            let key = match g.phase {
+                                UpdatePhase::Extracting => "update_extracting",
+                                UpdatePhase::Installing => "update_installing",
+                                _ => "update_downloading",
+                            };
+                            (i18n::t(self.lang, key), g.fraction, g.indeterminate)
+                        })
+                        .unwrap_or((i18n::t(self.lang, "update_downloading"), 0.0, true));
+                    ui.label(egui::RichText::new(label).color(SECONDARY));
+                    ui.add_space(4.0);
+                    if indeterminate {
+                        ui.add(egui::ProgressBar::new(0.0).animate(true));
+                    } else {
+                        ui.add(egui::ProgressBar::new(fraction).show_percentage());
+                    }
                 }
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
@@ -440,8 +459,11 @@ impl App {
         }
         if now {
             let info = info.clone();
+            let progress = Arc::new(Mutex::new(UpdateProgress::default()));
+            let progress_for_job = Arc::clone(&progress);
+            self.update_progress = Some(progress);
             self.update_job = Some(Promise::spawn_thread("apply-update", move || {
-                update::download_and_apply(&info)
+                update::download_and_apply(&info, Some(progress_for_job))
             }));
         }
     }
@@ -619,8 +641,14 @@ impl App {
         if let Some(p) = &self.update_job {
             if p.ready().is_some() {
                 match self.update_job.take().unwrap().block_and_take() {
-                    Ok(()) => self.update = None,
-                    Err(e) => self.alert(e),
+                    Ok(()) => {
+                        self.update = None;
+                        self.update_progress = None;
+                    }
+                    Err(e) => {
+                        self.update_progress = None;
+                        self.alert(e);
+                    }
                 }
             } else {
                 ctx.request_repaint();

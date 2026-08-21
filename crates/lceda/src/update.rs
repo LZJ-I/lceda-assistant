@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const REPO: &str = "LZJ-I/lceda-assistant";
@@ -16,6 +17,26 @@ pub struct UpdateInfo {
     pub zip_url: Option<String>,
     pub page_url: String,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UpdatePhase {
+    #[default]
+    Idle,
+    Downloading,
+    Extracting,
+    Installing,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UpdateProgress {
+    pub phase: UpdatePhase,
+    /// 0.0–1.0 overall progress.
+    pub fraction: f32,
+    /// When download size is unknown.
+    pub indeterminate: bool,
+}
+
+pub type ProgressHandle = Arc<Mutex<UpdateProgress>>;
 
 #[derive(Debug, Clone)]
 pub enum CheckResult {
@@ -68,22 +89,48 @@ pub fn check_for_update() -> CheckResult {
     })
 }
 
-pub fn download_and_apply(info: &UpdateInfo) -> Result<(), String> {
+pub fn download_and_apply(info: &UpdateInfo, progress: Option<ProgressHandle>) -> Result<(), String> {
     let url = info
         .zip_url
         .as_deref()
         .ok_or_else(|| "没有找到可下载的安装包".to_string())?;
-    let bytes = fetch_bytes(url).ok_or_else(|| "下载更新失败".to_string())?;
+    set_progress(
+        &progress,
+        UpdatePhase::Downloading,
+        0.0,
+        true,
+    );
+    let bytes = fetch_bytes_with_progress(url, &progress)
+        .ok_or_else(|| "下载更新失败".to_string())?;
     if bytes.len() < 64 {
         return Err("下载内容太小，不是安装包".into());
     }
+    set_progress(&progress, UpdatePhase::Extracting, 0.88, false);
     let exe = extract_exe(&bytes)?;
-    replace_self_and_restart(&exe)
+    set_progress(&progress, UpdatePhase::Installing, 0.96, false);
+    replace_self_and_restart(&exe)?;
+    set_progress(&progress, UpdatePhase::Idle, 1.0, false);
+    Ok(())
 }
 
 pub fn cleanup_old_binary() {
     if let Ok(cur) = std::env::current_exe() {
         let _ = fs::remove_file(old_path(&cur));
+    }
+}
+
+fn set_progress(
+    progress: &Option<ProgressHandle>,
+    phase: UpdatePhase,
+    fraction: f32,
+    indeterminate: bool,
+) {
+    if let Some(p) = progress {
+        if let Ok(mut g) = p.lock() {
+            g.phase = phase;
+            g.fraction = fraction.clamp(0.0, 1.0);
+            g.indeterminate = indeterminate;
+        }
     }
 }
 
@@ -166,6 +213,10 @@ fn old_path(current: &Path) -> PathBuf {
 }
 
 fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
+    fetch_bytes_with_progress(url, &None)
+}
+
+fn fetch_bytes_with_progress(url: &str, progress: &Option<ProgressHandle>) -> Option<Vec<u8>> {
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(120))
         .user_agent("lceda-assistant")
@@ -175,11 +226,29 @@ fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
         .set("Accept", "application/vnd.github+json,*/*")
         .call()
         .ok()?;
+    let total = resp
+        .header("Content-Length")
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|n| *n > 0);
+    let mut reader = resp.into_reader();
     let mut buf = Vec::new();
-    resp.into_reader()
-        .take(80 * 1024 * 1024)
-        .read_to_end(&mut buf)
-        .ok()?;
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut chunk).ok()?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() > 80 * 1024 * 1024 {
+            return None;
+        }
+        if let Some(total) = total {
+            let frac = (buf.len() as f64 / total as f64).min(1.0) as f32;
+            set_progress(progress, UpdatePhase::Downloading, frac * 0.85, false);
+        } else {
+            set_progress(progress, UpdatePhase::Downloading, 0.0, true);
+        }
+    }
     Some(buf)
 }
 
@@ -201,6 +270,7 @@ mod tests {
         assert!(parse_version("v0.1.2").unwrap() > parse_version("0.1.1").unwrap());
         assert_eq!(parse_version("v0.1.1"), parse_version("0.1.1"));
         assert!(parse_version("0.2.0").unwrap() > parse_version("0.1.9").unwrap());
+        assert!(parse_version("0.2.1").unwrap() > parse_version("0.2.0").unwrap());
     }
 
     #[test]
