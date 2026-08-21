@@ -1,6 +1,9 @@
+use super::preview3d::{self, GpuPreview};
 use super::theme::{self, ACCENT, LABEL, SECONDARY, WELL, WINDOW_BG};
 use crate::i18n::{self, Lang};
+use crate::update::{self, CheckResult, UpdateInfo};
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
+use eframe::egui_glow::glow;
 use lceda_core::client::LcedaClient;
 use lceda_core::export::{ExportRequest, export};
 use lceda_core::mesh::{self, Mesh};
@@ -9,16 +12,64 @@ use poll_promise::Promise;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 type SearchPromise = Promise<lceda_core::Result<Vec<SearchItem>>>;
 type ExportPromise = Promise<lceda_core::Result<String>>;
 type PreviewPromise = Promise<PreviewData>;
+type UpdatePromise = Promise<CheckResult>;
+type ApplyPromise = Promise<Result<(), String>>;
 
 const GAP: f32 = 10.0;
 const BTN_H: f32 = 32.0;
 const CARD_PAD: f32 = 12.0;
 
 const ICON_PNG: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icon.png"));
+
+#[derive(Clone, Copy)]
+struct BatchOpts {
+    step: bool,
+    obj: bool,
+    ad: bool,
+    kicad: bool,
+    pads: bool,
+    datasheet: bool,
+    source: bool,
+}
+
+impl Default for BatchOpts {
+    fn default() -> Self {
+        Self {
+            step: true,
+            obj: false,
+            ad: true,
+            kicad: true,
+            pads: false,
+            datasheet: false,
+            source: false,
+        }
+    }
+}
+
+impl BatchOpts {
+    fn any(self) -> bool {
+        self.step || self.obj || self.ad || self.kicad || self.pads || self.datasheet || self.source
+    }
+
+    fn request(self, out_dir: PathBuf) -> ExportRequest {
+        ExportRequest {
+            step: self.step,
+            obj: self.obj,
+            ad: self.ad,
+            kicad: self.kicad,
+            pads: self.pads,
+            datasheet: self.datasheet,
+            source_json: self.source || self.ad || self.kicad || self.pads,
+            force: true,
+            out_dir,
+        }
+    }
+}
 
 struct PreviewData {
     image: Option<Vec<u8>>,
@@ -48,7 +99,7 @@ pub fn run(lang: Lang) -> anyhow::Result<()> {
         Box::new(move |cc| {
             theme::apply(&cc.egui_ctx);
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            Ok(Box::new(App::new(lang)))
+            Ok(Box::new(App::new(lang, cc.gl.clone())))
         }),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
@@ -65,13 +116,22 @@ struct App {
     job: Option<ExportPromise>,
     preview: Option<PreviewPromise>,
     image_tex: Option<TextureHandle>,
-    mesh: Option<Mesh>,
+    mesh: Option<Arc<Mesh>>,
     mesh_tex: Option<TextureHandle>,
     mesh_note: Option<String>,
     yaw: f32,
     pitch: f32,
     zoom: f32,
     alert: Option<String>,
+    show_about: bool,
+    show_batch: bool,
+    batch_opts: BatchOpts,
+    about_note: Option<String>,
+    gpu: Option<Arc<egui::mutex::Mutex<GpuPreview>>>,
+    update_check: Option<UpdatePromise>,
+    update_manual: bool,
+    update: Option<UpdateInfo>,
+    update_job: Option<ApplyPromise>,
     frame: u32,
     pending_search: Option<String>,
     shot_path: Option<PathBuf>,
@@ -80,12 +140,17 @@ struct App {
 }
 
 impl App {
-    fn new(lang: Lang) -> Self {
+    fn new(lang: Lang, gl: Option<Arc<glow::Context>>) -> Self {
+        update::cleanup_old_binary();
         let out_dir = default_out_dir();
         let logs = vec![
             i18n::t(lang, "no_dotnet").into(),
             format!("{}  {}", i18n::t(lang, "output"), out_dir),
         ];
+        let gpu = gl.and_then(|ctx| {
+            GpuPreview::new(ctx.as_ref()).map(|g| Arc::new(egui::mutex::Mutex::new(g)))
+        });
+        let skip_update = env::var("LCEDA_SHOT").is_ok();
         Self {
             lang,
             keyword: String::new(),
@@ -104,6 +169,19 @@ impl App {
             pitch: 0.55,
             zoom: 1.0,
             alert: None,
+            show_about: false,
+            show_batch: false,
+            batch_opts: BatchOpts::default(),
+            about_note: None,
+            gpu,
+            update_check: if skip_update {
+                None
+            } else {
+                Some(Promise::spawn_thread("update", update::check_for_update))
+            },
+            update_manual: false,
+            update: None,
+            update_job: None,
             frame: 0,
             pending_search: env::var("LCEDA_SEARCH").ok().filter(|s| !s.is_empty()),
             shot_path: env::var("LCEDA_SHOT").ok().filter(|s| !s.is_empty()).map(PathBuf::from),
@@ -130,27 +208,241 @@ impl App {
             return;
         };
         let mut close = false;
-        egui::Window::new(i18n::t(self.lang, "notice"))
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .collapsible(false)
-            .resizable(false)
-            .max_width(300.0)
-            .max_height(280.0)
+        let line_count = msg.lines().count().max(1);
+        let longest = msg.lines().map(|l| l.chars().count()).max().unwrap_or(12);
+        let width = ((longest as f32) * 8.5 + 40.0).clamp(300.0, 440.0);
+        let tall = line_count > 8;
+        fit_window(i18n::t(self.lang, "notice"), "lceda_notice_fit", width)
+            .max_height(if tall { 280.0 } else { 800.0 })
             .show(ctx, |ui| {
-                ui.set_max_width(280.0);
-                egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
-                    ui.set_max_width(268.0);
-                    ui.add(egui::Label::new(egui::RichText::new(&msg).color(LABEL)).wrap());
-                });
-                ui.add_space(10.0);
+                ui.set_width(width - 8.0);
+                ui.spacing_mut().item_spacing.y = 4.0;
+                let add_text = |ui: &mut egui::Ui| {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(&msg).color(LABEL))
+                            .wrap()
+                            .halign(egui::Align::Min),
+                    );
+                };
+                if tall {
+                    egui::ScrollArea::vertical()
+                        .max_height(220.0)
+                        .auto_shrink([false, true])
+                        .show(ui, add_text);
+                } else {
+                    add_text(ui);
+                }
+                ui.add_space(8.0);
+                if dialog_ok_row(ui, i18n::t(self.lang, "ok")) {
+                    close = true;
+                }
+            });
+        if close {
+            self.alert = None;
+        }
+    }
+
+    fn show_about(&mut self, ctx: &egui::Context) {
+        if !self.show_about {
+            return;
+        }
+        let mut close = false;
+        let mut open_repo = false;
+        let mut check = false;
+        let width = 420.0;
+        let checking = self.update_check.is_some();
+        let can_check = self.update_job.is_none() && self.update.is_none();
+        let check_label = if checking {
+            i18n::t(self.lang, "checking_update")
+        } else {
+            i18n::t(self.lang, "check_update")
+        };
+        fit_window(i18n::t(self.lang, "about"), "lceda_about_fit", width).show(ctx, |ui| {
+            ui.set_width(width - 8.0);
+            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.label(
+                egui::RichText::new(i18n::t(self.lang, "app_title"))
+                    .color(LABEL)
+                    .size(18.0)
+                    .strong(),
+            );
+            ui.add_space(6.0);
+            kv_line(ui, i18n::t(self.lang, "about_ver"), update::current_version());
+            kv_line(ui, i18n::t(self.lang, "about_author"), "LZJ-I");
+            kv_line(ui, i18n::t(self.lang, "about_repo"), update::REPO);
+            kv_line(ui, i18n::t(self.lang, "about_license"), "CC BY-NC-4.0");
+            if let Some(note) = &self.about_note {
+                ui.add_space(6.0);
+                ui.add(egui::Label::new(egui::RichText::new(note).color(SECONDARY)).wrap());
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if theme::pill_button(ui, i18n::t(self.lang, "ok"), true, true).clicked() {
                         close = true;
                     }
+                    if theme::pill_button(ui, i18n::t(self.lang, "open_repo"), true, false).clicked()
+                    {
+                        open_repo = true;
+                    }
+                    if theme::pill_button(ui, check_label, can_check, false).clicked() {
+                        check = true;
+                    }
                 });
             });
+        });
+        if check {
+            self.request_update_check(true);
+        }
+        if open_repo {
+            let _ = webbrowser::open(update::REPO_URL);
+        }
         if close {
-            self.alert = None;
+            self.show_about = false;
+            self.about_note = None;
+        }
+    }
+
+    fn show_batch_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_batch {
+            return;
+        }
+        let mut close = false;
+        let mut start = false;
+        let lang = self.lang;
+        let width = 400.0;
+        fit_window(i18n::t(lang, "batch_title"), "lceda_batch_fit", width).show(ctx, |ui| {
+            ui.set_width(width - 8.0);
+            ui.label(egui::RichText::new(i18n::t(lang, "batch_hint")).color(SECONDARY));
+            ui.add_space(8.0);
+            egui::Grid::new("batch_opts")
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    ui.checkbox(&mut self.batch_opts.step, i18n::t(lang, "download_step"));
+                    ui.checkbox(&mut self.batch_opts.obj, i18n::t(lang, "download_obj"));
+                    ui.end_row();
+                    ui.checkbox(&mut self.batch_opts.ad, i18n::t(lang, "export_ad"));
+                    ui.checkbox(&mut self.batch_opts.kicad, i18n::t(lang, "export_kicad"));
+                    ui.end_row();
+                    ui.checkbox(&mut self.batch_opts.pads, i18n::t(lang, "export_pads"));
+                    ui.checkbox(&mut self.batch_opts.datasheet, i18n::t(lang, "datasheet"));
+                    ui.end_row();
+                    ui.checkbox(&mut self.batch_opts.source, i18n::t(lang, "export_source"));
+                    ui.end_row();
+                });
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::pill_button(ui, i18n::t(lang, "batch_start"), true, true).clicked() {
+                        start = true;
+                    }
+                    if theme::pill_button(ui, i18n::t(lang, "batch_cancel"), true, false).clicked() {
+                        close = true;
+                    }
+                });
+            });
+        });
+        if start {
+            if !self.batch_opts.any() {
+                self.alert(i18n::t(self.lang, "batch_none"));
+            } else if self.start_batch() {
+                close = true;
+            }
+        }
+        if close {
+            self.show_batch = false;
+        }
+    }
+
+    fn request_update_check(&mut self, manual: bool) {
+        if self.update.is_some() || self.update_job.is_some() {
+            if manual {
+                self.show_about = false;
+            }
+            return;
+        }
+        if self.update_check.is_some() {
+            if manual {
+                self.update_manual = true;
+                self.about_note = None;
+            }
+            return;
+        }
+        self.update_manual = manual;
+        self.about_note = None;
+        self.update_check = Some(Promise::spawn_thread("update", update::check_for_update));
+    }
+
+    fn show_update(&mut self, ctx: &egui::Context) {
+        let Some(info) = self.update.clone() else {
+            return;
+        };
+        let downloading = self.update_job.is_some();
+        let mut later = false;
+        let mut now = false;
+        let mut open = false;
+        let body = i18n::t(self.lang, "update_body")
+            .replace("{cur}", update::current_version())
+            .replace("{new}", &info.version);
+        let width = 400.0;
+        fit_window(i18n::t(self.lang, "update_title"), "lceda_update_fit", width).show(
+            ctx,
+            |ui| {
+                ui.set_width(width - 8.0);
+                ui.add(egui::Label::new(egui::RichText::new(body).color(LABEL)).wrap());
+                if downloading {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(i18n::t(self.lang, "update_downloading")).color(SECONDARY),
+                    );
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if !downloading {
+                            if info.zip_url.is_some()
+                                && theme::pill_button(
+                                    ui,
+                                    i18n::t(self.lang, "update_now"),
+                                    true,
+                                    true,
+                                )
+                                .clicked()
+                            {
+                                now = true;
+                            }
+                            if theme::pill_button(ui, i18n::t(self.lang, "update_open"), true, false)
+                                .clicked()
+                            {
+                                open = true;
+                            }
+                            if theme::pill_button(
+                                ui,
+                                i18n::t(self.lang, "update_later"),
+                                true,
+                                false,
+                            )
+                            .clicked()
+                            {
+                                later = true;
+                            }
+                        }
+                    });
+                });
+            },
+        );
+        if open {
+            let _ = webbrowser::open(&info.page_url);
+        }
+        if later {
+            self.update = None;
+        }
+        if now {
+            let info = info.clone();
+            self.update_job = Some(Promise::spawn_thread("apply-update", move || {
+                update::download_and_apply(&info)
+            }));
         }
     }
 
@@ -202,6 +494,12 @@ impl eframe::App for App {
                         if theme::pill_button(ui, label, true, false).clicked() {
                             self.lang = self.lang.toggle();
                         }
+                        ui.add_space(6.0);
+                        if theme::pill_button(ui, i18n::t(self.lang, "about"), true, false).clicked()
+                        {
+                            self.show_about = true;
+                            self.about_note = None;
+                        }
                     });
                 });
             });
@@ -222,7 +520,16 @@ impl eframe::App for App {
                 self.right_pane(ui);
             });
         self.show_alert(ctx);
+        self.show_about(ctx);
+        self.show_batch_dialog(ctx);
+        self.show_update(ctx);
         self.tick_debug_shot(ctx);
+    }
+
+    fn on_exit(&mut self, gl: Option<&glow::Context>) {
+        if let (Some(gl), Some(gpu)) = (gl, self.gpu.take()) {
+            gpu.lock().destroy(gl);
+        }
     }
 }
 
@@ -265,11 +572,55 @@ impl App {
             if p.ready().is_some() {
                 let data = self.preview.take().unwrap().block_and_take();
                 self.image_tex = data.image.as_ref().and_then(|b| load_texture(ctx, b));
-                self.mesh = data.mesh;
+                self.mesh = data.mesh.map(Arc::new);
                 self.mesh_note = data.mesh_note;
                 self.mesh_tex = None;
                 if let Some(note) = &self.mesh_note {
                     self.log(note.clone());
+                }
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if let Some(p) = &self.update_check {
+            if p.ready().is_some() {
+                let result = self.update_check.take().unwrap().block_and_take();
+                let manual = self.update_manual;
+                self.update_manual = false;
+                match result {
+                    CheckResult::Available(info) => {
+                        self.update = Some(info);
+                        self.show_about = false;
+                        self.about_note = None;
+                    }
+                    CheckResult::UpToDate if manual => {
+                        let note = i18n::t(self.lang, "already_latest")
+                            .replace("{ver}", update::current_version());
+                        if self.show_about {
+                            self.about_note = Some(note);
+                        } else {
+                            self.alert(note);
+                        }
+                    }
+                    CheckResult::Failed if manual => {
+                        let note = i18n::t(self.lang, "update_check_fail").to_string();
+                        if self.show_about {
+                            self.about_note = Some(note);
+                        } else {
+                            self.alert(note);
+                        }
+                    }
+                    _ => {}
+                }
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if let Some(p) = &self.update_job {
+            if p.ready().is_some() {
+                match self.update_job.take().unwrap().block_and_take() {
+                    Ok(()) => self.update = None,
+                    Err(e) => self.alert(e),
                 }
             } else {
                 ctx.request_repaint();
@@ -486,12 +837,12 @@ impl App {
             if resp.dragged() {
                 let d = resp.drag_delta();
                 self.yaw += d.x * 0.01;
-                self.pitch = (self.pitch + d.y * 0.01).clamp(-1.35, 1.35);
+                self.pitch += d.y * 0.01;
             }
             if resp.hovered() {
                 let scroll = ui.input(|i| i.smooth_scroll_delta.y);
                 if scroll != 0.0 {
-                    self.zoom = (self.zoom * (1.0 + scroll * 0.003)).clamp(0.4, 2.8);
+                    self.zoom = (self.zoom * (1.0 + scroll * 0.003)).clamp(0.15, 8.0);
                 }
             }
             if resp.double_clicked() {
@@ -509,16 +860,24 @@ impl App {
                     egui::FontId::proportional(14.0),
                     SECONDARY,
                 );
-            } else if let Some(image) = self.mesh.as_ref().map(|mesh| {
-                rasterize_mesh(
+            } else if let (Some(gpu), Some(mesh)) = (self.gpu.clone(), self.mesh.clone()) {
+                ui.painter().add(preview3d::paint_callback(
+                    inner,
+                    gpu,
+                    mesh,
+                    self.yaw,
+                    self.pitch,
+                    self.zoom,
+                ));
+            } else if let Some(mesh) = self.mesh.as_ref() {
+                let image = rasterize_mesh(
                     mesh,
                     inner,
                     self.yaw,
                     self.pitch,
                     self.zoom,
                     ui.ctx().pixels_per_point(),
-                )
-            }) {
+                );
                 let tex = ui.ctx().load_texture("mesh3d", image, TextureOptions::LINEAR);
                 painter.image(
                     tex.id(),
@@ -566,7 +925,7 @@ impl App {
         let mut kicad = false;
         let mut datasheet = false;
         let mut page = false;
-        let mut source = false;
+        let mut pads = false;
         let mut batch = false;
         let mut browse = false;
         let mut open = false;
@@ -600,9 +959,9 @@ impl App {
                     false,
                 ),
                 (
-                    i18n::t(lang, "export_source"),
+                    i18n::t(lang, "export_pads"),
                     en && has_ad,
-                    false,
+                    true,
                     i18n::t(lang, "batch"),
                     !self.busy(),
                     false,
@@ -615,7 +974,7 @@ impl App {
             kicad = clicks[1].1;
             datasheet = clicks[2].0;
             page = clicks[2].1;
-            source = clicks[3].0;
+            pads = clicks[3].0;
             batch = clicks[3].1;
 
             ui.add_space(4.0);
@@ -674,8 +1033,9 @@ impl App {
                 req.source_json = true;
             });
         }
-        if source {
+        if pads {
             self.require_export(has_item, has_ad, i18n::t(self.lang, "no_cad"), |req| {
+                req.pads = true;
                 req.source_json = true;
             });
         }
@@ -698,7 +1058,7 @@ impl App {
             if self.busy() {
                 self.alert(i18n::t(self.lang, "working"));
             } else {
-                self.run_batch();
+                self.show_batch = true;
             }
         }
     }
@@ -803,32 +1163,24 @@ impl App {
         }));
     }
 
-    fn run_batch(&mut self) {
+    fn start_batch(&mut self) -> bool {
         let Some(file) = rfd::FileDialog::new()
             .add_filter("text", &["txt", "csv", "list"])
             .pick_file()
         else {
-            return;
+            return false;
         };
         let out_dir = PathBuf::from(self.out_dir.trim());
         if let Err(e) = std::fs::create_dir_all(&out_dir) {
             self.alert(format!("{}: {e}", i18n::t(self.lang, "error")));
-            return;
+            return false;
         }
+        let req = self.batch_opts.request(out_dir.clone());
         self.log(format!("{}  {}", i18n::t(self.lang, "saving_to"), out_dir.display()));
         self.job = Some(Promise::spawn_thread("batch", move || {
             let text = std::fs::read_to_string(&file)
                 .map_err(|e| lceda_core::Error::msg(format!("read {}: {e}", file.display())))?;
             let ids = lceda_core::models::parse_id_list(&text);
-            let req = ExportRequest {
-                step: true,
-                ad: true,
-                kicad: true,
-                source_json: true,
-                force: true,
-                out_dir: out_dir.clone(),
-                ..Default::default()
-            };
             let client = LcedaClient::new();
             let mut lines = Vec::new();
             let mut fail = 0;
@@ -844,6 +1196,7 @@ impl App {
             lines.push(format!("done, failed={fail}"));
             Ok(lines.join("\n"))
         }));
+        true
     }
 
     fn tick_debug_shot(&mut self, ctx: &egui::Context) {
@@ -894,6 +1247,42 @@ impl App {
             std::process::exit(3);
         }
     }
+}
+
+fn kv_line(ui: &mut egui::Ui, key: &str, value: &str) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(format!("{key}：")).color(SECONDARY));
+        ui.label(egui::RichText::new(value).color(LABEL));
+    });
+}
+
+fn fit_window<'a>(
+    title: impl Into<egui::WidgetText>,
+    id: &'static str,
+    width: f32,
+) -> egui::Window<'a> {
+    egui::Window::new(title)
+        .id(egui::Id::new(id))
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .collapsible(false)
+        .resizable(false)
+        .default_width(width)
+        .default_height(1.0)
+        .min_width(width)
+        .max_width(width)
+        .min_height(0.0)
+}
+
+fn dialog_ok_row(ui: &mut egui::Ui, ok: &str) -> bool {
+    let mut clicked = false;
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if theme::pill_button(ui, ok, true, true).clicked() {
+                clicked = true;
+            }
+        });
+    });
+    clicked
 }
 
 fn card_shell(ui: &mut egui::Ui, rect: egui::Rect, id: &'static str, add: impl FnOnce(&mut egui::Ui)) {
@@ -980,7 +1369,7 @@ fn format_paths(paths: &lceda_core::models::DownloadPaths, out_dir: &Path) -> St
         .as_ref()
         .map(|p| short_name(p))
         .unwrap_or_else(|| out_dir.display().to_string());
-    let mut lines = vec![format!("已保存到 {folder}")];
+    let mut lines = vec!["已保存到".into(), folder];
     if let Some(p) = &paths.step {
         lines.push(format!("STEP  {}", short_name(p)));
     }
@@ -1001,6 +1390,15 @@ fn format_paths(paths: &lceda_core::models::DownloadPaths, out_dir: &Path) -> St
     }
     if let Some(p) = &paths.kicad_mod {
         lines.push(format!("封装  {}", short_name(p)));
+    }
+    if let Some(p) = &paths.pads_c {
+        lines.push(format!("PADS .c  {}", short_name(p)));
+    }
+    if let Some(p) = &paths.pads_d {
+        lines.push(format!("PADS .d  {}", short_name(p)));
+    }
+    if let Some(p) = &paths.pads_p {
+        lines.push(format!("PADS .p  {}", short_name(p)));
     }
     if let Some(p) = &paths.symbol_json {
         lines.push(format!("符号 JSON  {}", short_name(p)));
@@ -1060,12 +1458,16 @@ fn rasterize_mesh(
     zoom: f32,
     pixels_per_point: f32,
 ) -> ColorImage {
-    let ppp = pixels_per_point.clamp(1.0, 2.0);
+    let ppp = pixels_per_point.clamp(1.0, 3.0);
     let w = (rect.width() * ppp).round().max(1.0) as usize;
     let h = (rect.height() * ppp).round().max(1.0) as usize;
-    let w = w.min(1600);
-    let h = h.min(900);
     let mut pixels = vec![0_u8; w * h * 4];
+    for px in pixels.chunks_exact_mut(4) {
+        px[0] = 236;
+        px[1] = 236;
+        px[2] = 241;
+        px[3] = 255;
+    }
     if mesh.vertices.is_empty() || mesh.triangles.is_empty() {
         return ColorImage::from_rgba_unmultiplied([w, h], &pixels);
     }
@@ -1137,7 +1539,7 @@ fn rasterize_mesh(
         let cxp = ox + cc[0] * scale;
         let cy = oy - cc[1] * scale;
         let area = (bx - ax) * (cy - ay) - (by - ay) * (cxp - ax);
-        if area.abs() < 0.5 {
+        if area.abs() < 1e-4 {
             continue;
         }
         let min_x = ax.min(bx).min(cxp).floor().max(0.0) as i32;

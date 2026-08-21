@@ -5,6 +5,7 @@ use crate::error::{Error, Result};
 use crate::ir::{self, FootprintIr, PartMeta, SymbolIr};
 use crate::kicad;
 use crate::mesh;
+use crate::pads;
 use crate::models::{DownloadPaths, SearchItem};
 use crate::util::{ensure_parent, looks_like_step, sanitize_filename};
 use serde_json::Value;
@@ -17,6 +18,7 @@ pub struct ExportRequest {
     pub obj: bool,
     pub ad: bool,
     pub kicad: bool,
+    pub pads: bool,
     pub datasheet: bool,
     pub source_json: bool,
     pub force: bool,
@@ -30,6 +32,7 @@ impl Default for ExportRequest {
             obj: false,
             ad: false,
             kicad: false,
+            pads: false,
             datasheet: false,
             source_json: false,
             force: false,
@@ -40,7 +43,7 @@ impl Default for ExportRequest {
 
 impl ExportRequest {
     pub fn any_library(&self) -> bool {
-        self.ad || self.kicad || self.source_json
+        self.ad || self.kicad || self.pads || self.source_json
     }
 }
 
@@ -114,7 +117,7 @@ pub fn export(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> R
         }
         let (symbol_json, footprint_json, symbol_ir, footprint_ir) =
             fetch_sources(client, item, &part_dir, &base, req.force)?;
-        if req.source_json || req.ad || req.kicad {
+        if req.source_json || req.ad || req.kicad || req.pads {
             out.symbol_json = symbol_json;
             out.footprint_json = footprint_json;
         }
@@ -137,6 +140,15 @@ pub fn export(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> R
                 symbol_ir.as_ref(),
                 footprint_ir.as_ref(),
                 step.as_deref(),
+            )?;
+        }
+        if req.pads {
+            export_pads(
+                &mut out,
+                &part_dir,
+                &base,
+                symbol_ir.as_ref(),
+                footprint_ir.as_ref(),
             )?;
         }
     }
@@ -245,6 +257,23 @@ fn export_kicad(
     }
     if out.kicad_sym.is_none() && out.kicad_mod.is_none() {
         return Err(Error::msg("未能生成 KiCad 库，已保留 EasyEDA 源 JSON"));
+    }
+    Ok(())
+}
+
+fn export_pads(
+    out: &mut DownloadPaths,
+    out_dir: &Path,
+    base: &str,
+    symbol_ir: Option<&SymbolIr>,
+    footprint_ir: Option<&FootprintIr>,
+) -> Result<()> {
+    let (c, d, p) = pads::write_part_files(out_dir, base, symbol_ir, footprint_ir)?;
+    out.pads_c = c;
+    out.pads_d = d;
+    out.pads_p = p;
+    if out.pads_c.is_none() && out.pads_d.is_none() && out.pads_p.is_none() {
+        return Err(Error::msg("未能生成 PADS .c/.d/.p，已保留 EasyEDA 源 JSON"));
     }
     Ok(())
 }

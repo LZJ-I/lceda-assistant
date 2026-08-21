@@ -1,14 +1,20 @@
+**语言 / Language:** **中文** · [English](README_EN.md)
+
 # 立创封装助手
 
-用 Rust 编写。按型号或立创编号搜索器件，下载 STEP / OBJ，导出 Altium（`.SchLib` / `.PcbLib`）和 KiCad（`.kicad_sym` / `.pretty`）库。界面支持中文 / 英文。
+[![Stars](https://img.shields.io/github/stars/LZJ-I/lceda-assistant?style=social)](https://github.com/LZJ-I/lceda-assistant)
 
-![立创封装助手界面，示例器件 ESP32-S3-WROOM-1-N16R8](docs/screenshot.png)
+用 Rust 编写。按型号或立创编号搜索器件，下载 STEP / OBJ，导出 Altium（`.SchLib` / `.PcbLib`）、KiCad（`.kicad_sym` / `.pretty`）和经典 PADS Logic / Layout ASCII（`.c` / `.d` / `.p`）。界面支持中文 / 英文。
+
+如果这个项目对你有帮助，欢迎点一下右上角的 [⭐ Star](https://github.com/LZJ-I/lceda-assistant)。
+
+![搜索 STM32F103C8T6 / C8734 并查看三维外形](docs/demo.gif)
 
 许可为 [CC BY-NC-4.0](https://creativecommons.org/licenses/by-nc/4.0/)，禁止商用。
 
 ## 安装
 
-从 [Releases](https://github.com/LZJ-I/lceda-assistant/releases) 下载 Windows 64 位压缩包，解压后运行 `lceda.exe`。更新时解压覆盖即可。
+从 [Releases](https://github.com/LZJ-I/lceda-assistant/releases) 下载 Windows 64 位压缩包，解压后运行 `lceda.exe`。更新时解压覆盖即可。软件内也可检查更新并自动替换后重启。
 
 或从源码编译（需 [Rust](https://rustup.rs/)）：
 
@@ -28,16 +34,18 @@ cargo build --release -p lceda --target x86_64-pc-windows-msvc
    - **下载 STEP / OBJ**：三维模型
    - **导出 AD 库**：`.SchLib` / `.PcbLib`（同时保留 EasyEDA JSON）
    - **导出 KiCad**：`.kicad_sym` 与 `.pretty`
+   - **导出 PADS**：`.c` 原理图 Decal、`.d` PCB Decal、`.p` Part Type（经典 Logic / Layout；Professional / Xpedition 不能当 Central Library）
    - **数据手册**：PDF。立创给的经常是 HTML 页，程序会从页面里取出真正的 PDF
    - **打开立创页**：国内站商品页（`item.szlcsc.com`）
-   - **仅源文件**：只保存 EasyEDA JSON
-   - **批量文件…**：选一个文本文件，每行一个编号或关键字
+   - **批量文件…**：先勾选要写出的类型，再选一个文本文件，每行一个编号或关键字
 
 按钮变灰表示当前器件没有对应资源；再点一下会弹出说明，不会建空文件夹。
 
+导出 AD / KiCad / PADS 时会同时留下 EasyEDA JSON，供对照，不必单独再导一遍。
+
 ### 批量文件
 
-每行一个型号或立创编号，`#` 或 `//` 开头为注释。界面里的批量会尽量导出 STEP、AD、KiCad 和源 JSON。
+每行一个型号或立创编号，`#` 或 `//` 开头为注释。界面里点「批量文件…」会先弹出勾选框，可只导出其中几种（例如只要 PADS，或只要 AD）。
 
 ```
 # 例子
@@ -52,15 +60,23 @@ C2040
 
 ```bash
 lceda search C2040
-lceda get C2040 --step --ad --kicad -o ./out
+lceda get C2040 --step --ad --kicad --pads -o ./out
 lceda get C2040 --source -o ./out
 lceda get C2040 --datasheet -o ./out
-lceda batch ids.txt --ad --kicad --step -o ./out
+lceda batch ids.txt --ad --kicad --pads --step -o ./out
 lceda --lang en gui
 ```
 
-`batch` 文本文件格式与上面相同。
+`batch` 文本文件格式与上面相同；命令行用 `--ad` / `--kicad` / `--pads` 等开关选择类型。
 
 ## 说明
 
-导出结果请在 Altium / KiCad 中核对后再使用。本工具使用立创非官方接口，可能随时变化。
+导出结果请在 Altium / KiCad / PADS 中核对后再使用。本工具使用立创非官方接口，可能随时变化。
+
+## 关于
+
+- 作者：[LZJ-I](https://github.com/LZJ-I)
+- 仓库：[LZJ-I/lceda-assistant](https://github.com/LZJ-I/lceda-assistant)
+- 许可：[CC BY-NC-4.0](https://creativecommons.org/licenses/by-nc/4.0/)（禁止商用）
+
+有帮助的话，欢迎 [Star](https://github.com/LZJ-I/lceda-assistant)。

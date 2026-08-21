@@ -3,6 +3,7 @@
 mod cli;
 mod gui;
 mod i18n;
+mod update;
 
 fn main() {
     #[cfg(windows)]

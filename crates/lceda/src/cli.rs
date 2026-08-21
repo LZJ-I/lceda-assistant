@@ -8,7 +8,7 @@ use lceda_core::models::{self, DownloadPaths};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "lceda", version, about = "立创封装助手：搜索、3D、Altium / KiCad 库导出")]
+#[command(name = "lceda", version, about = "立创封装助手：搜索、3D、Altium / KiCad / PADS 库导出")]
 pub struct Cli {
     /// zh / en（默认跟随系统）
     #[arg(long, global = true)]
@@ -43,6 +43,9 @@ pub enum Cmd {
         /// 写出 KiCad 符号 / 封装
         #[arg(long)]
         kicad: bool,
+        /// 写出 PADS Logic/Layout ASCII 库（.c / .d / .p）
+        #[arg(long)]
+        pads: bool,
         /// 下载数据手册 PDF
         #[arg(long)]
         datasheet: bool,
@@ -65,6 +68,8 @@ pub enum Cmd {
         ad: bool,
         #[arg(long)]
         kicad: bool,
+        #[arg(long)]
+        pads: bool,
         #[arg(long)]
         datasheet: bool,
         #[arg(long)]
@@ -122,6 +127,7 @@ pub fn run() -> Result<i32> {
             obj,
             ad,
             kicad,
+            pads,
             datasheet,
             source,
             output,
@@ -129,7 +135,7 @@ pub fn run() -> Result<i32> {
         }) => {
             let client = LcedaClient::new();
             let item = client.select(&keyword, index)?;
-            let req = build_req(step, obj, ad, kicad, datasheet, source, output, force);
+            let req = build_req(step, obj, ad, kicad, pads, datasheet, source, output, force);
             let paths = export::export(&client, &item, &req).context("export failed")?;
             print_paths(&paths);
             Ok(0)
@@ -140,6 +146,7 @@ pub fn run() -> Result<i32> {
             obj,
             ad,
             kicad,
+            pads,
             datasheet,
             source,
             output,
@@ -152,7 +159,7 @@ pub fn run() -> Result<i32> {
                 println!("empty list");
                 return Ok(1);
             }
-            let req = build_req(step, obj, ad, kicad, datasheet, source, output, force);
+            let req = build_req(step, obj, ad, kicad, pads, datasheet, source, output, force);
             let client = LcedaClient::new();
             let mut failed = 0;
             for (kw, result) in export::export_batch(&client, &ids, &req) {
@@ -177,6 +184,7 @@ fn build_req(
     obj: bool,
     ad: bool,
     kicad: bool,
+    pads: bool,
     datasheet: bool,
     source: bool,
     output: PathBuf,
@@ -187,12 +195,14 @@ fn build_req(
         obj,
         ad,
         kicad,
+        pads,
         datasheet,
-        source_json: source || ad || kicad,
+        source_json: source || ad || kicad || pads,
         force,
         out_dir: output,
     };
-    if !req.step && !req.obj && !req.ad && !req.kicad && !req.datasheet && !req.source_json {
+    if !req.step && !req.obj && !req.ad && !req.kicad && !req.pads && !req.datasheet && !req.source_json
+    {
         req.step = true;
         req.ad = true;
         req.kicad = true;
@@ -231,5 +241,14 @@ fn print_paths(paths: &DownloadPaths) {
     }
     if let Some(p) = &paths.kicad_mod {
         println!("KiCad footprint: {}", p.display());
+    }
+    if let Some(p) = &paths.pads_c {
+        println!("PADS .c: {}", p.display());
+    }
+    if let Some(p) = &paths.pads_d {
+        println!("PADS .d: {}", p.display());
+    }
+    if let Some(p) = &paths.pads_p {
+        println!("PADS .p: {}", p.display());
     }
 }

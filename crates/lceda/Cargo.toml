@@ -3,7 +3,7 @@ name = "lceda"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "立创封装助手：搜索、3D、Altium / KiCad 库导出"
+description = "立创封装助手：搜索、3D、Altium / KiCad / PADS 库导出"
 
 [[bin]]
 name = "lceda"
@@ -21,6 +21,9 @@ poll-promise = "0.3"
 rfd = "0.15"
 directories = "6"
 webbrowser = "1"
+serde_json.workspace = true
+ureq.workspace = true
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [build-dependencies]
 winresource = "0.1"

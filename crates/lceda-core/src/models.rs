@@ -122,6 +122,9 @@ pub struct DownloadPaths {
     pub pcblib: Option<PathBuf>,
     pub kicad_sym: Option<PathBuf>,
     pub kicad_mod: Option<PathBuf>,
+    pub pads_c: Option<PathBuf>,
+    pub pads_d: Option<PathBuf>,
+    pub pads_p: Option<PathBuf>,
     pub datasheet: Option<PathBuf>,
 }
 
@@ -137,6 +140,9 @@ impl DownloadPaths {
             || self.pcblib.is_some()
             || self.kicad_sym.is_some()
             || self.kicad_mod.is_some()
+            || self.pads_c.is_some()
+            || self.pads_d.is_some()
+            || self.pads_p.is_some()
     }
 }
 
